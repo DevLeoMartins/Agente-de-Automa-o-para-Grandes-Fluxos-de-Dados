@@ -344,34 +344,125 @@ def carregar_dados(caminho_arquivo, sep=None, encoding=None) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
-# Limpeza
+# Limpeza e Validação Numérica
 # --------------------------------------------------------------------------
-def _para_numero(serie: pd.Series) -> pd.Series:
+_PREFIXO_MOEDA = re.compile(
+    r"^\s*([+-]?)\s*(?:R\$|BRL|\$|USD|EUR|€|GBP|£)?\s*([+-]?)\s*",
+    re.IGNORECASE,
+)
+_SUFIXO_MOEDA = re.compile(
+    r"\s*(?:R\$|BRL|\$|USD|EUR|€|GBP|£)\s*$",
+    re.IGNORECASE,
+)
+_MILHAR_PONTO = re.compile(r"^[1-9]\d{0,2}(\.\d{3})+$")
+_BR_MILHAR_DECIMAL = re.compile(r"^\d{1,3}(\.\d{3})+,\d+$")
+_US_MILHAR_DECIMAL = re.compile(r"^\d{1,3}(,\d{3})+\.\d+$")
+_DECIMAL_VIRGULA = re.compile(r"^\d+,\d+$")
+_DECIMAL_PONTO = re.compile(r"^\d+\.\d+$")
+_INTEIRO = re.compile(r"^\d+$")
+
+
+def _converte_valor_individual(val, nome_coluna: str = "") -> float | None:
+    """
+    Analisa e converte uma string para número com validação estrita.
+
+    Comportamentos:
+    1. Valor válido puro: "10", "2.50", "3.5" -> aceita e normaliza para float.
+    2. Valor formatado: "R$ 1.234,56", "1,234.56", "1.234" (milhar), "1,234" (decimal) ->
+       reconhece padrões brasileiros e internacionais sem perda de informação.
+    3. Valor contaminado: "12abc", "abc", "12a34", "12..34" -> rejeita e registra o motivo
+       no log sem tentar adivinhar caracteres.
+    """
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+
+    s = str(val).strip()
+    if not s:
+        return None
+
+    # Reconhece prefixo monetário e sinais
+    m_pre = _PREFIXO_MOEDA.match(s)
+    s1, s2 = (m_pre.group(1), m_pre.group(2)) if m_pre else ("", "")
+    resto = s[m_pre.end():] if m_pre else s
+
+    # Reconhece sufixo monetário
+    m_suf = _SUFIXO_MOEDA.search(resto)
+    if m_suf:
+        resto = resto[:m_suf.start()]
+
+    resto = resto.strip()
+    if not resto:
+        log.warning(
+            "Valor vazio ou apenas símbolo monetário descartado na coluna '%s': %r",
+            nome_coluna, val,
+        )
+        return None
+
+    is_neg = (s1 == "-") ^ (s2 == "-")
+    sign = -1.0 if is_neg else 1.0
+
+    # 1. Valor contaminado: contém caracteres alfanuméricos ou símbolos não numéricos
+    if not re.match(r"^[\d.,]+$", resto):
+        log.warning(
+            "Valor numérico contaminado descartado na coluna '%s': %r (contém caracteres inválidos)",
+            nome_coluna, val,
+        )
+        return None
+
+    # 2. Inteiro puro: "10", "1234"
+    if _INTEIRO.match(resto):
+        return sign * float(resto)
+
+    # 3. Formato brasileiro com milhar e decimal: "1.234,56" ou "1.234.567,89"
+    if _BR_MILHAR_DECIMAL.match(resto):
+        return sign * float(resto.replace(".", "").replace(",", "."))
+
+    # 4. Formato internacional com milhar e decimal: "1,234.56" ou "1,234,567.89"
+    if _US_MILHAR_DECIMAL.match(resto):
+        return sign * float(resto.replace(",", ""))
+
+    # 5. Decimal com vírgula: "2,50", "1,234" (com apenas vírgula, ela é decimal)
+    if _DECIMAL_VIRGULA.match(resto):
+        return sign * float(resto.replace(",", "."))
+
+    # 6. Milhar com ponto sem decimal: "1.234", "12.345", "1.234.567"
+    if _MILHAR_PONTO.match(resto):
+        return sign * float(resto.replace(".", ""))
+
+    # 7. Decimal com ponto: "2.50", "3.5", "0.123"
+    if _DECIMAL_PONTO.match(resto):
+        return sign * float(resto)
+
+    # 8. Estrutura ambígua / separadores malformados: "12..34", "1.2.3"
+    log.warning(
+        "Valor com formato numérico inválido/ambíguo descartado na coluna '%s': %r",
+        nome_coluna, val,
+    )
+    return None
+
+
+def _para_numero(serie: pd.Series, nome_coluna: str = "") -> pd.Series:
     """
     Converte texto para número aceitando formatos BR e US. Inválidos viram NaN.
 
-        "2.50" -> 2.5      "2,50" -> 2.5       "R$ 1.234,56" -> 1234.56
-        "1,234.56" -> 1234.56                  "abc" -> NaN
+        "2.50" -> 2.5       "2,50" -> 2.5        "R$ 1.234,56" -> 1234.56
+        "1,234.56" -> 1234.56                    "1.234" -> 1234.0 (milhar com ponto)
+        "1,234" -> 1.234 (decimal com vírgula)  "12abc" -> NaN (contaminado)
 
-    Regra: com os dois símbolos, o ÚLTIMO é o decimal. Com só vírgula, ela é decimal
-    (então "1,234" vale 1.234; milhar sem decimal precisa de ponto: "1.234").
+    Regras:
+    - Com dois símbolos (ponto e vírgula): o último é decimal.
+    - Com apenas vírgula: ela é decimal ("1,234" -> 1.234).
+    - Com apenas ponto e grupos de milhar válidos: ponto é milhar ("1.234" -> 1234.0).
+    - Valores com caracteres estranhos ("12abc") são rejeitados como contaminados.
     """
-    # Sempre float64: tipo estável entre blocos (senão "10" seria int num bloco e
-    # float em outro, e o hash usado na deduplicação entre blocos divergiria).
     if pd.api.types.is_numeric_dtype(serie):
         return pd.to_numeric(serie, errors="coerce").astype("float64")
 
-    s = serie.astype("string").str.strip().str.replace(r"[^\d,.\-]", "", regex=True)
-    tem_virgula = s.str.contains(",", regex=False).fillna(False).astype(bool)
-    tem_ponto = s.str.contains(".", regex=False).fillna(False).astype(bool)
-    virgula_e_decimal = (
-        tem_virgula & (~tem_ponto | (s.str.rfind(",") > s.str.rfind("."))).fillna(False).astype(bool)
-    )
-    virgula_e_milhar = tem_virgula & ~virgula_e_decimal  # formato "1,234.56"
-
-    s = s.mask(virgula_e_decimal, s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
-    s = s.mask(virgula_e_milhar, s.str.replace(",", "", regex=False))
-    return pd.to_numeric(s, errors="coerce").astype("float64")
+    valores_unicos = serie.dropna().unique()
+    mapa = {v: _converte_valor_individual(v, nome_coluna) for v in valores_unicos}
+    return serie.map(mapa).astype("float64")
 
 
 def _deduplicar(df: pd.DataFrame, vistos: set | None) -> pd.DataFrame:
@@ -410,7 +501,7 @@ def limpar_dados(df: pd.DataFrame, _vistos: set | None = None, _resumo: Resumo |
 
     for col in COLUNAS_NUMERICAS:
         if col in df.columns:
-            df[col] = _para_numero(df[col])
+            df[col] = _para_numero(df[col], nome_coluna=col)
 
     antes = len(df)
     df = df.dropna()

@@ -27,3 +27,18 @@ Adicionado README completo e dados de entrada para testes.
 ## Commit 6: test/docs — 20 testes e README reescrito
 - `requirements.txt`: `pandas==2.1.0` fixo era incompatível com Python 3.12+ recente e o README
   dizia "Python 3.8+" (pandas 2.1 exige 3.9+). Agora `pandas>=2.1,<4`, Python 3.9+.
+
+## Commit 7: feat — suporte multi-formato (XML, SQLite, DOCX, Markdown) e Licença MIT
+- Leitura unificada de arquivos XML, SQLite (.db/.sqlite), DOCX e Markdown (.md) via `carregar_arquivo`.
+- Suporte a seleção de tabela SQL via flag `--tabela`.
+- Adicionada Licença MIT ao projeto (`LICENSE`).
+- Adicionados 19 testes automatizados cobrindo todos os novos formatos.
+
+## Commit 8: fix — validação numérica estrita em `_para_numero()`
+- Rejeição de valores contaminados: strings com caracteres misturados (ex: `12abc`, `12a34`)
+  não são mais limpas cegamente por regex permissivo; agora são rejeitadas como inválidas
+  (viram `NaN` e são descartadas) com registro explicativo no log.
+- Resolução de ambiguidade em milhar com ponto: strings no formato `1.234` ou `1.234.567`
+  são corretamente interpretadas como milhar (`1234.0`), cumprindo a especificação descrita.
+  Enquanto strings com apenas vírgula (`1,234`) são tratadas como decimal (`1.234`).
+- Adicionados testes automatizados cobrindo rejeição de contaminação e formatos de milhar.
