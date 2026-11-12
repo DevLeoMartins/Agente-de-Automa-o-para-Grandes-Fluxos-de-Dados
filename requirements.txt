@@ -1,0 +1,4 @@
+# Testado com Python 3.12 + pandas 3.0. A API usada existe desde o pandas 2.1.
+pandas>=2.1,<4
+lxml>=4.9          # leitura de XML (pd.read_xml)
+python-docx>=0.8   # leitura de DOCX
